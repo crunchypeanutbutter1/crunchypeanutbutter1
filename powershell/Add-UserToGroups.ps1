@@ -1,83 +1,219 @@
+#Requires -Modules ActiveDirectory
+
 <#
 .SYNOPSIS
-    Adds a user to all groups that another user is a member of.
+    Copies Active Directory group memberships from one user to another.
 
 .DESCRIPTION
-    This script gets all AD groups from a source user and adds a target user to those groups.
-    It validates that both users exist before executing the operations.
+    Production-oriented helper for onboarding and access parity tasks.
+    The script validates source/target users, safely skips primary groups,
+    supports -WhatIf/-Confirm, optional removal of extra memberships,
+    and can export an audit CSV for change tracking.
+
+.PARAMETER SourceUser
+    SamAccountName, UPN, DN, or GUID for the source user.
+
+.PARAMETER TargetUser
+    SamAccountName, UPN, DN, or GUID for the target user.
+
+.PARAMETER IncludeDistributionGroups
+    Include non-security groups when copying memberships.
+
+.PARAMETER RemoveGroupsNotOnSource
+    Remove target user from groups they are in that source user is not.
+
+.PARAMETER ReportPath
+    Optional path to write an action report as CSV.
+
+.PARAMETER PassThru
+    Return action objects to the pipeline.
 
 .EXAMPLE
-    .\Add-UserToGroups.ps1
+    .\Add-UserToGroups.ps1 -SourceUser jsmith -TargetUser jdoe -WhatIf
+
+.EXAMPLE
+    .\Add-UserToGroups.ps1 -SourceUser jsmith -TargetUser jdoe -RemoveGroupsNotOnSource -Confirm:$false
 #>
 
-# Function to validate if a user exists in Active Directory
-function Test-ADUserExists {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Identity
-    )
-    
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$SourceUser,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TargetUser,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeDistributionGroups,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$RemoveGroupsNotOnSource,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ReportPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$PassThru
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-User {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
     try {
-        $user = Get-ADUser -Identity $Identity -ErrorAction Stop
-        return $true
+        Get-ADUser -Identity $Identity -Properties MemberOf, SamAccountName, UserPrincipalName, DistinguishedName
     }
     catch {
-        return $false
+        throw "Active Directory user '$Identity' was not found."
     }
 }
 
-# Prompt for source user
-do {
-    $sourceUser = Read-Host "Enter the source user (the user whose groups will be copied FROM)"
-    
-    if (-not (Test-ADUserExists -Identity $sourceUser)) {
-        Write-Host "User '$sourceUser' not found in Active Directory. Please try again." -ForegroundColor Red
+function Get-ComparableGroupSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$GroupDns,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AllowDistribution
+    )
+
+    $result = New-Object System.Collections.Generic.HashSet[string]
+
+    foreach ($groupDn in $GroupDns) {
+        try {
+            $group = Get-ADGroup -Identity $groupDn -Properties GroupCategory, Name
+
+            if (-not $AllowDistribution -and $group.GroupCategory -ne 'Security') {
+                continue
+            }
+
+            [void]$result.Add($group.DistinguishedName)
+        }
+        catch {
+            Write-Warning "Skipping unresolved group '$groupDn'. Error: $($_.Exception.Message)"
+        }
     }
-} while (-not (Test-ADUserExists -Identity $sourceUser))
 
-Write-Host "Source user '$sourceUser' found." -ForegroundColor Green
-
-# Prompt for target user
-do {
-    $targetUser = Read-Host "Enter the target user (the user whose will be added TO the groups)"
-    
-    if (-not (Test-ADUserExists -Identity $targetUser)) {
-        Write-Host "User '$targetUser' not found in Active Directory. Please try again." -ForegroundColor Red
-    }
-} while (-not (Test-ADUserExists -Identity $targetUser))
-
-Write-Host "Target user '$targetUser' found." -ForegroundColor Green
-
-# Confirm operation
-Write-Host ""
-Write-Host "This will add '$targetUser' to all groups that '$sourceUser' is a member of." -ForegroundColor Yellow
-$confirm = Read-Host "Do you want to continue? (Y/N)"
-
-if ($confirm -ne 'Y' -and $confirm -ne 'y') {
-    Write-Host "Operation cancelled." -ForegroundColor Yellow
-    exit
+    return $result
 }
 
-# Get the groups from the source user
-try {
-    Write-Host "Retrieving groups for '$sourceUser'..." -ForegroundColor Cyan
-    $getUserGroups = Get-ADUser -Identity $sourceUser -Properties MemberOf -ErrorAction Stop | Select-Object -ExpandProperty MemberOf
-    
-    if ($getUserGroups.Count -eq 0) {
-        Write-Host "User '$sourceUser' is not a member of any groups." -ForegroundColor Yellow
-        exit
+if (-not $SourceUser) {
+    $SourceUser = Read-Host 'Enter source user (copy memberships FROM)'
+}
+
+if (-not $TargetUser) {
+    $TargetUser = Read-Host 'Enter target user (copy memberships TO)'
+}
+
+$source = Resolve-User -Identity $SourceUser
+$target = Resolve-User -Identity $TargetUser
+
+if ($source.DistinguishedName -eq $target.DistinguishedName) {
+    throw 'Source and target are the same user. No action taken.'
+}
+
+$sourceGroups = Get-ComparableGroupSet -GroupDns @($source.MemberOf) -AllowDistribution:$IncludeDistributionGroups
+$targetGroups = Get-ComparableGroupSet -GroupDns @($target.MemberOf) -AllowDistribution:$IncludeDistributionGroups
+
+$groupsToAdd = $sourceGroups.Where({ -not $targetGroups.Contains($_) })
+$groupsToRemove = @()
+
+if ($RemoveGroupsNotOnSource) {
+    $groupsToRemove = $targetGroups.Where({ -not $sourceGroups.Contains($_) })
+}
+
+Write-Host "Source user: $($source.SamAccountName)" -ForegroundColor Cyan
+Write-Host "Target user: $($target.SamAccountName)" -ForegroundColor Cyan
+Write-Host "Groups to add: $($groupsToAdd.Count)" -ForegroundColor Green
+if ($RemoveGroupsNotOnSource) {
+    Write-Host "Groups to remove: $($groupsToRemove.Count)" -ForegroundColor Yellow
+}
+
+$actionLog = New-Object System.Collections.Generic.List[object]
+
+foreach ($groupDn in $groupsToAdd) {
+    $group = Get-ADGroup -Identity $groupDn -Properties Name
+    $targetName = "$($target.SamAccountName) -> $($group.Name)"
+
+    if ($PSCmdlet.ShouldProcess($targetName, 'Add user to group')) {
+        try {
+            Add-ADGroupMember -Identity $groupDn -Members $target.DistinguishedName -ErrorAction Stop
+            Write-Host "Added to group: $($group.Name)" -ForegroundColor Green
+
+            $actionLog.Add([PSCustomObject]@{
+                Timestamp = Get-Date
+                Action    = 'Add'
+                GroupName = $group.Name
+                GroupDN   = $groupDn
+                User      = $target.SamAccountName
+                Result    = 'Success'
+                Error     = $null
+            })
+        }
+        catch {
+            Write-Warning "Failed adding to '$($group.Name)': $($_.Exception.Message)"
+            $actionLog.Add([PSCustomObject]@{
+                Timestamp = Get-Date
+                Action    = 'Add'
+                GroupName = $group.Name
+                GroupDN   = $groupDn
+                User      = $target.SamAccountName
+                Result    = 'Failed'
+                Error     = $_.Exception.Message
+            })
+        }
     }
-    
-    Write-Host "Found $($getUserGroups.Count) group(s) to add '$targetUser' to." -ForegroundColor Green
-    Write-Host ""
-    
-    # Add target user to each group
-    $getUserGroups | Add-ADGroupMember -Members $targetUser -Verbose
-    
-    Write-Host ""
-    Write-Host "Successfully added '$targetUser' to all groups!" -ForegroundColor Green
 }
-catch {
-    Write-Host "An error occurred: $_" -ForegroundColor Red
-    exit 1
+
+foreach ($groupDn in $groupsToRemove) {
+    $group = Get-ADGroup -Identity $groupDn -Properties Name
+    $targetName = "$($target.SamAccountName) <- $($group.Name)"
+
+    if ($PSCmdlet.ShouldProcess($targetName, 'Remove user from group')) {
+        try {
+            Remove-ADGroupMember -Identity $groupDn -Members $target.DistinguishedName -Confirm:$false -ErrorAction Stop
+            Write-Host "Removed from group: $($group.Name)" -ForegroundColor Yellow
+
+            $actionLog.Add([PSCustomObject]@{
+                Timestamp = Get-Date
+                Action    = 'Remove'
+                GroupName = $group.Name
+                GroupDN   = $groupDn
+                User      = $target.SamAccountName
+                Result    = 'Success'
+                Error     = $null
+            })
+        }
+        catch {
+            Write-Warning "Failed removing from '$($group.Name)': $($_.Exception.Message)"
+            $actionLog.Add([PSCustomObject]@{
+                Timestamp = Get-Date
+                Action    = 'Remove'
+                GroupName = $group.Name
+                GroupDN   = $groupDn
+                User      = $target.SamAccountName
+                Result    = 'Failed'
+                Error     = $_.Exception.Message
+            })
+        }
+    }
 }
+
+if ($ReportPath) {
+    $parent = Split-Path -Path $ReportPath -Parent
+    if ($parent -and -not (Test-Path -Path $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $actionLog | Export-Csv -Path $ReportPath -NoTypeInformation -Encoding UTF8
+    Write-Host "Audit report exported to: $ReportPath" -ForegroundColor Cyan
+}
+
+if ($PassThru) {
+    $actionLog
+}
+
+Write-Host 'Completed group membership sync.' -ForegroundColor Green
