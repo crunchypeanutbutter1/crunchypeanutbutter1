@@ -1,0 +1,310 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+\hypersetup{
+colorlinks=true,
+linkcolor=black,
+urlcolor=blue
+}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{0.75em}{}
+
+\lstset{
+basicstyle=\ttfamily\small,
+backgroundcolor=\color{gray!8},
+frame=single,
+breaklines=true,
+columns=fullflexible,
+literate=
+  {<=}{{$\leq$}}1
+  {>=}{{$\geq$}}1
+}
+
+\title{\textbf{Zendesk Ticket Request Quality Feedback Automation}\\
+\vspace{4pt}
+\large Open Implementation Guide}
+
+\date{}
+\author{}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+
+This document describes a Zendesk workflow that improves support ticket quality by automatically providing feedback to requesters when a ticket receives a low internal rating.
+
+The system introduces:
+
+\begin{itemize}
+\item A conditional multi-select field allowing agents to record why a request was difficult to resolve
+\item An automated requester email containing guidance for submitting better tickets
+\item Internal audit notes documenting automated feedback events
+\item Safeguards to prevent duplicate notifications
+\end{itemize}
+
+This workflow can help support teams reduce follow-up requests for missing information and improve overall ticket resolution efficiency.
+
+\section{Current State}
+
+Many support environments allow agents to rate the quality of a ticket request after resolving the issue.
+
+However, without structured feedback mechanisms:
+
+\begin{itemize}
+\item Requesters may repeatedly submit incomplete tickets
+\item Agents must spend time requesting missing information
+\item Support teams lack reporting on common submission issues
+\end{itemize}
+
+The workflow described in this document addresses these issues through automation and structured feedback.
+
+\section{Proposed System}
+
+\subsection{Conditional Feedback Field}
+
+A multi-select field titled:
+
+\textbf{Bad Rating Reason}
+
+is displayed only when the internal ticket rating is low.
+
+\subsubsection{Field Behavior}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Property & Configuration \\
+\midrule
+Field Type & Multi-select \\
+Visibility & Visible only when rating $\leq$ 2 \\
+Required & Required when visible \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Field Values}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Value & Tag \\
+\midrule
+Not enough information & not\_enough\_information \\
+Poor contact method & poor\_contact\_method \\
+Did not submit ticket & did\_not\_submit\_ticket \\
+Walk-Up & walk-up \\
+No response & no\_response \\
+Not listed above & not\_listed\_above \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+These values allow agents to document the most common ticket submission issues.
+
+\section{Automation Logic}
+
+A Zendesk trigger runs when a ticket is solved and rated poorly.
+
+\subsection{Trigger Conditions}
+
+\begin{lstlisting}
+Ticket Status = Solved
+User rating <= 2
+Bad Rating Reason is present
+Tag requester_feedback_sent NOT present
+\end{lstlisting}
+
+\subsection{Trigger Actions}
+
+\begin{lstlisting}
+Send Email to Requester
+Add Internal Note
+Add Tag requester_feedback_sent
+\end{lstlisting}
+
+The tag ensures the notification is only sent once per ticket.
+
+\section{Dynamic Requester Email Template}
+
+Paste the following template into the Zendesk trigger email body.
+
+\begin{lstlisting}
+Hello {{ticket.requester.first_name}},
+
+We’re always happy to help and want to make sure your issues get resolved
+as quickly as possible.
+
+Based on your most recent request, here are a few things that would help us
+resolve similar issues faster next time:
+
+{% if ticket.tags contains "not_enough_information" %}
+- Please include more detail about the issue including the application
+  name, error messages, and screenshots when possible.
+{% endif %}
+
+{% if ticket.tags contains "poor_contact_method" %}
+- Please include the best way to reach you such as a phone number or
+  extension.
+{% endif %}
+
+{% if ticket.tags contains "no_response" %}
+- If we ask follow-up questions, please reply promptly so we can continue
+  troubleshooting your request.
+{% endif %}
+
+{% if ticket.tags contains "walk-up" %}
+- Please submit a web-form ticket when possible rather than making a
+  walk-up request so the issue can be properly tracked and routed.
+{% endif %}
+
+{% if ticket.tags contains "did_not_submit_ticket" %}
+- Please submit a ticket through the web form so the request can be
+  documented and routed correctly.
+{% endif %}
+
+{% if ticket.tags contains "not_listed_above" %}
+- Providing clear details and contact information helps resolve requests
+  faster.
+{% endif %}
+
+Thank you for helping us improve the support process.
+
+- Support Team
+\end{lstlisting}
+
+\newpage
+
+\section{Dynamic Internal Audit Note}
+
+Paste the following template into the trigger's internal note action.
+
+\begin{lstlisting}
+Requester feedback automation executed.
+
+User rating recorded: 1 or 2
+
+Selected guidance sent:
+
+{% if ticket.tags contains "not_enough_information" %}
+- Not enough information
+{% endif %}
+
+{% if ticket.tags contains "poor_contact_method" %}
+- Poor contact method
+{% endif %}
+
+{% if ticket.tags contains "no_response" %}
+- No response to follow-up
+{% endif %}
+
+{% if ticket.tags contains "walk-up" %}
+- Walk-Up request
+{% endif %}
+
+{% if ticket.tags contains "did_not_submit_ticket" %}
+- Did not submit ticket
+{% endif %}
+
+Tag applied: requester_feedback_sent
+\end{lstlisting}
+
+\section{Benefits}
+
+\begin{itemize}
+\item Improves ticket submission quality
+\item Reduces resolution delays caused by missing information
+\item Creates measurable data on ticket submission issues
+\item Encourages structured communication between requesters and support teams
+\end{itemize}
+
+\section{Implementation Steps}
+
+\subsection{Step 1: Create the Multi-Select Field}
+
+\begin{enumerate}
+\item Open Zendesk Admin Center
+\item Navigate to \textbf{Objects and Rules → Tickets → Fields}
+\item Click \textbf{Add Field}
+\item Select \textbf{Multiselect}
+\item Name the field \textbf{Bad Rating Reason}
+\item Add the values listed in Section 3
+\item Save the field
+\end{enumerate}
+
+\subsection{Step 2: Add the Field to the Ticket Form}
+
+\begin{enumerate}
+\item Navigate to \textbf{Objects and Rules → Tickets → Forms}
+\item Open the active ticket form
+\item Add the field \textbf{Bad Rating Reason}
+\item Create a condition:
+\end{enumerate}
+
+\begin{lstlisting}
+IF User rating <= 2
+SHOW Bad Rating Reason
+AND make required
+\end{lstlisting}
+
+\subsection{Step 3: Create the Automation Trigger}
+
+\begin{enumerate}
+\item Go to \textbf{Objects and Rules → Business Rules → Triggers}
+\item Click \textbf{Add Trigger}
+\item Name it \textbf{Requester Feedback Automation}
+\item Configure conditions listed in Section 4
+\item Configure actions listed in Section 4
+\end{enumerate}
+
+\subsection{Step 4: Paste Email Template}
+
+Copy the template from:
+
+\textbf{Section 5 – Dynamic Requester Email Template}
+
+Paste it into the trigger's email action.
+
+\subsection{Step 5: Paste Internal Note}
+
+Copy the template from:
+
+\textbf{Section 6 – Dynamic Internal Audit Note}
+
+Paste it into the internal note action.
+
+\subsection{Step 6: Test the Workflow}
+
+\begin{enumerate}
+\item Create a test ticket
+\item Set rating = 1
+\item Confirm the Bad Rating Reason field appears
+\item Select a reason
+\item Solve the ticket
+\item Verify:
+\begin{itemize}
+\item Requester email was sent
+\item Internal note was created
+\item Automation tag was applied
+\end{itemize}
+\end{enumerate}
+
+\section{Conclusion}
+
+This automation provides a structured, scalable approach to improving support ticket quality while maintaining a positive and constructive tone with requesters.
+
+By integrating conditional fields, dynamic messaging, and automated documentation, support teams can reduce resolution delays and improve operational efficiency.
+
+\end{document}
