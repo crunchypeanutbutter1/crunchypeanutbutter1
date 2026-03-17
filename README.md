@@ -30,3 +30,14 @@ Highlights:
 - Top memory-consuming processes
 - Automatic services that are stopped
 - Optional CSV export for daily operational snapshots
+
+## Portable Toolkit
+
+### `windows/CSWinDiagToolkit`
+Portable CSWinDiag automation wrapper for field use.
+
+Highlights:
+- Self-elevates to Administrator for UAC-safe execution
+- Stages `cswindiag.exe` into `%ProgramFiles%\AdminTools` automatically
+- Runs CSWinDiag and copies resulting ZIP into an easy-to-spot Desktop folder
+- Produces transfer notes suitable for copying to a flash drive and sending to Support
